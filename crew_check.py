@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 # 페이지 설정
 st.set_page_config(layout="wide", page_title="Crew 분석 시스템 Pro")
 
-# --- 커스텀 CSS ---
+# --- 커스텀 CSS (기본 스타일 유지 + 설명서 디자인 추가) ---
 st.markdown("""
     <style>
     .stTable td, .stTable th {
@@ -29,6 +29,18 @@ st.markdown("""
     .badge-out { background-color: #e03131; }
     .badge-info { background-color: #f08c00; }
     .flight-header { background-color: #f1f3f5; padding: 10px 15px; border-radius: 8px; font-weight: bold; margin-top: 15px; border-left: 4px solid #495057; }
+    
+    /* 추가된 사용설명서 스타일 */
+    .user-guide {
+        background-color: #f1f3f5;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #1c7ed6;
+        margin-bottom: 20px;
+    }
+    .guide-title { font-weight: 800; color: #1c7ed6; font-size: 1rem; margin-bottom: 8px; }
+    .guide-content { font-size: 0.85rem; color: #495057; line-height: 1.6; }
+    .important { color: #e03131; font-weight: 800; text-decoration: underline; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -37,15 +49,10 @@ def normalize_id(x):
     """사번 앞의 0(Zero) 생략 이슈 해결 및 형식 통일"""
     if pd.isna(x) or str(x).strip() == "": return ""
     text = str(x).strip()
-    
-    # 엑셀 소수점 .0 제거
     if text.endswith('.0'): text = text[:-2]
-    
-    # 숫자로만 이루어진 사번인 경우, 앞의 0을 제거하여 통일 (0855032 -> 855032)
     try:
         return str(int(text))
     except ValueError:
-        # 문자가 포함된 사번의 경우 공백 제거 및 대문자화만 진행
         return text.replace(" ", "").upper()
 
 def normalize_name(x):
@@ -107,15 +114,27 @@ def load_crew_right(file):
         return df
     except: return None
 
-# --- 메인 분석 UI ---
-# (사이드바 및 업로드 로직은 이전과 동일)
+# --- 사이드바 (사용설명서 추가) ---
 with st.sidebar:
+    st.markdown("""
+        <div class="user-guide">
+            <div class="guide-title">💡 사용 설명서 (必讀)</div>
+            <div class="guide-content">
+                1. <b>기존(Old) / 신규(New)</b> 파일을 각각 업로드하세요.<br>
+                2. <b>신규 파일 업로드 시 주의사항:</b><br>
+                연박(🏨) 상태를 확인하려면 신규 명단 엑셀에 <span class="important">반드시 [분석 기준일]과 [그 다음날]의 명단이 모두 포함</span>되어 있어야 합니다.<br>
+                3. 이름 띄어쓰기나 사번 앞자리 '0' 유무는 시스템이 자동으로 매칭합니다.
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+    
     st.header("⚙️ 분석 설정")
     show_layover_only = st.checkbox("🏨 연박 인원만 보기", value=False)
     if st.button("🔄 데이터 초기화"):
         st.cache_data.clear()
         st.rerun()
 
+# --- 메인 분석 UI ---
 st.title("✈️ Crew 명단 통합 분석 Pro")
 up_l, up_r = st.columns(2)
 df_l = df_r = None
@@ -173,10 +192,8 @@ if df_l is not None and df_r is not None:
     with view_center:
         st.markdown("<h2 style='text-align: center; margin-bottom: 25px;'>📋 통합 변경 리포트</h2>", unsafe_allow_html=True)
         
-        # 사번(숫자변환 완료) 기반 병합
         all_merged = pd.merge(df_l, df_r, on="CrewID", how="outer", suffixes=('_old', '_new'))
         
-        # 편수 이동 분석
         moved_crew = all_merged[all_merged['Arr Flt_old'].notna() & all_merged['Arr Flt_new'].notna() & (all_merged['Arr Flt_old'] != all_merged['Arr Flt_new'])].copy()
         processed_ids = set(moved_crew['CrewID'].tolist())
         
@@ -186,7 +203,6 @@ if df_l is not None and df_r is not None:
                 names_html = " ".join([f"<span class='badge' style='background-color:#4c6ef5; display:inline-block; margin-bottom:5px;'>{n}</span>" for n in group['CrewName_new']])
                 st.markdown(f"<div class='move-group-card'><div class='move-title'>🚚 편수 이동: {old_f} ➔ {new_f}</div>{names_html}</div>", unsafe_allow_html=True)
 
-        # 항공편별 상세 변경
         sorted_flts = df_l.sort_values(by=["Arr Time", "Arr Flt"])["Arr Flt"].unique().tolist()
         new_only_flts = [f for f in df_r["Arr Flt"].unique() if f not in sorted_flts]
         all_flts_ordered = sorted_flts + new_only_flts
@@ -222,7 +238,6 @@ if df_l is not None and df_r is not None:
                 n_r = curr_new[curr_new["CrewID"] == sid].iloc[0]
                 sub = []
                 
-                # 띄어쓰기 다른 이름은 무시 (MatchName 사용)
                 if o_r['is_layover'] != n_r['is_layover']:
                     sub.append("연박 변경" if n_r['is_layover'] else "연박 해제")
                 
@@ -242,6 +257,6 @@ if df_l is not None and df_r is not None:
             if items_html:
                 st.markdown(f"<div class='group-card'><div class='flight-title'>✈️ {flt}</div>{''.join(items_html)}</div>", unsafe_allow_html=True)
 
-    st.success("✅ 업데이트 완료: 사번 앞자리 0 생략 및 이름 띄어쓰기 차이를 모두 해결했습니다.")
+    st.success("✅ 업데이트 완료: 사번 및 이름 보정 로직이 적용되었습니다.")
 else:
     st.info("💡 파일을 업로드하여 분석을 시작하세요.")
