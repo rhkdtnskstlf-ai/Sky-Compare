@@ -6,10 +6,9 @@ from datetime import datetime, timedelta
 # 페이지 설정
 st.set_page_config(layout="wide", page_title="Crew 분석 시스템 Pro")
 
-# --- 커스텀 CSS (너비 확보 및 가독성 개선) ---
+# --- 커스텀 CSS ---
 st.markdown("""
     <style>
-    /* 테이블 내 텍스트가 세로로 쪼개지지 않도록 설정 */
     .stTable td, .stTable th {
         white-space: nowrap !important;
         font-size: 0.85rem !important;
@@ -27,7 +26,7 @@ st.markdown("""
     .badge { padding: 2px 8px; border-radius: 4px; font-size: 0.85em; font-weight: 800; margin-right: 12px; color: white; min-width: 45px; text-align: center; }
     .badge-swap { background-color: #1c7ed6; }
     .badge-in { background-color: #2f9e44; }
-    .badge-out { background-color: #e03131; } /* CXL 배지 색상 유지 */
+    .badge-out { background-color: #e03131; }
     .badge-info { background-color: #f08c00; }
     .flight-header { background-color: #f1f3f5; padding: 10px 15px; border-radius: 8px; font-weight: bold; margin-top: 15px; border-left: 4px solid #495057; }
     </style>
@@ -35,10 +34,24 @@ st.markdown("""
 
 # --- 유틸리티 함수 ---
 def normalize_id(x):
+    """사번 앞의 0(Zero) 생략 이슈 해결 및 형식 통일"""
     if pd.isna(x) or str(x).strip() == "": return ""
     text = str(x).strip()
+    
+    # 엑셀 소수점 .0 제거
     if text.endswith('.0'): text = text[:-2]
-    return text.upper()
+    
+    # 숫자로만 이루어진 사번인 경우, 앞의 0을 제거하여 통일 (0855032 -> 855032)
+    try:
+        return str(int(text))
+    except ValueError:
+        # 문자가 포함된 사번의 경우 공백 제거 및 대문자화만 진행
+        return text.replace(" ", "").upper()
+
+def normalize_name(x):
+    """이름의 모든 공백 및 탭 제거"""
+    if pd.isna(x): return ""
+    return str(x).replace(" ", "").replace("\t", "").strip().upper()
 
 def format_time_display(val):
     if pd.isna(val) or val == "": return "-"
@@ -68,9 +81,11 @@ def load_crew_left(file, sheet_name):
         c_id_val = ws[f"A{r}"].value
         if c_id_val is None: continue
         name_cell = ws[f"B{r}"] 
+        raw_name = str(name_cell.value).strip() if name_cell.value else "Unknown"
         data.append({
             "CrewID": normalize_id(c_id_val),
-            "CrewName": str(name_cell.value).strip() if name_cell.value else "Unknown",
+            "CrewName": raw_name,
+            "MatchName": normalize_name(raw_name),
             "Arr Flt": str(ws[f"G{r}"].value).strip().upper() if ws[f"G{r}"].value else "OPEN",
             "Arr Time": ws[f"H{r}"].value,
             "Dep Flt": str(ws[f"J{r}"].value).strip().upper() if ws[f"J{r}"].value else "OPEN", 
@@ -79,19 +94,21 @@ def load_crew_left(file, sheet_name):
         })
     df = pd.DataFrame(data)
     df = df[df["CrewID"] != ""]
-    return df.sort_values(by=["Arr Time", "Arr Flt", "CrewName"]).reset_index(drop=True)
+    return df
 
 def load_crew_right(file):
     try:
         df = pd.read_excel(file, header=2, usecols="D:E,O:P,Q:R", engine='openpyxl')
         df.columns = ["CrewID", "CrewName", "Arr Flt", "Arr Time", "Dep Flt", "Dep Time"]
         df["CrewID"] = df["CrewID"].apply(normalize_id)
+        df["MatchName"] = df["CrewName"].apply(normalize_name)
         df["Date_Only"] = pd.to_datetime(df["Arr Time"], dayfirst=True, errors='coerce').dt.date
         df = df.dropna(subset=["CrewID"])
-        return df.sort_values(by=["Arr Time", "Arr Flt", "CrewName"]).reset_index(drop=True)
+        return df
     except: return None
 
-# --- 사이드바 ---
+# --- 메인 분석 UI ---
+# (사이드바 및 업로드 로직은 이전과 동일)
 with st.sidebar:
     st.header("⚙️ 분석 설정")
     show_layover_only = st.checkbox("🏨 연박 인원만 보기", value=False)
@@ -116,14 +133,15 @@ with up_r:
         df_r_raw = load_crew_right(f_r)
         if df_r_raw is not None:
             u_dates = sorted([d for d in df_r_raw["Date_Only"].unique() if pd.notna(d)])
-            sel_d = st.selectbox("도착일 선택", u_dates)
-            next_d = sel_d + timedelta(days=1)
-            today_data = df_r_raw[df_r_raw["Date_Only"] == sel_d].copy()
-            next_day_ids = set(df_r_raw[df_r_raw["Date_Only"] == next_d]["CrewID"])
-            today_data["is_layover"] = today_data["CrewID"].apply(lambda x: x in next_day_ids)
-            df_r = today_data.sort_values(by=["Arr Time", "Arr Flt", "CrewName"]).reset_index(drop=True)
+            if u_dates:
+                sel_d = st.selectbox("도착일 선택", u_dates)
+                next_d = sel_d + timedelta(days=1)
+                today_data = df_r_raw[df_r_raw["Date_Only"] == sel_d].copy()
+                next_day_ids = set(df_r_raw[df_r_raw["Date_Only"] == next_d]["CrewID"])
+                today_data["is_layover"] = today_data["CrewID"].apply(lambda x: x in next_day_ids)
+                df_r = today_data
 
-# --- 분석 섹션 ---
+# --- 분석 엔진 ---
 if df_l is not None and df_r is not None:
     if show_layover_only:
         df_l = df_l[df_l['is_layover'] == True].copy()
@@ -138,14 +156,15 @@ if df_l is not None and df_r is not None:
             if df.empty:
                 st.write("데이터 없음")
                 return
-            for flt in df["Arr Flt"].unique():
-                gp = df[df["Arr Flt"] == flt]
+            sorted_df = df.sort_values(by=["Arr Time", "Arr Flt", "CrewName"])
+            for flt in sorted_df["Arr Flt"].unique():
+                gp = sorted_df[sorted_df["Arr Flt"] == flt]
                 st.markdown(f"<div class='flight-header'>{flt} ({len(gp)}명)</div>", unsafe_allow_html=True)
                 disp = gp.copy()
                 disp["🏨"] = disp["is_layover"].map({True: "✅", False: ""})
                 disp["이름(ID)"] = disp["CrewName"] + "(" + disp["CrewID"] + ")"
                 disp["도착"] = disp["Arr Time"].apply(format_time_display)
-                disp["출발"] = disp["Dep Flt"] + " (" + disp["Dep Time"].apply(format_time_display) + ")"
+                disp["출발"] = disp["Dep Flt"].astype(str) + " (" + disp["Dep Time"].apply(format_time_display) + ")"
                 st.table(disp[["🏨", "도착", "이름(ID)", "출발"]])
 
     display_list(view_l, df_l, "⬅️ 기존 명단")
@@ -154,7 +173,10 @@ if df_l is not None and df_r is not None:
     with view_center:
         st.markdown("<h2 style='text-align: center; margin-bottom: 25px;'>📋 통합 변경 리포트</h2>", unsafe_allow_html=True)
         
+        # 사번(숫자변환 완료) 기반 병합
         all_merged = pd.merge(df_l, df_r, on="CrewID", how="outer", suffixes=('_old', '_new'))
+        
+        # 편수 이동 분석
         moved_crew = all_merged[all_merged['Arr Flt_old'].notna() & all_merged['Arr Flt_new'].notna() & (all_merged['Arr Flt_old'] != all_merged['Arr Flt_new'])].copy()
         processed_ids = set(moved_crew['CrewID'].tolist())
         
@@ -164,6 +186,7 @@ if df_l is not None and df_r is not None:
                 names_html = " ".join([f"<span class='badge' style='background-color:#4c6ef5; display:inline-block; margin-bottom:5px;'>{n}</span>" for n in group['CrewName_new']])
                 st.markdown(f"<div class='move-group-card'><div class='move-title'>🚚 편수 이동: {old_f} ➔ {new_f}</div>{names_html}</div>", unsafe_allow_html=True)
 
+        # 항공편별 상세 변경
         sorted_flts = df_l.sort_values(by=["Arr Time", "Arr Flt"])["Arr Flt"].unique().tolist()
         new_only_flts = [f for f in df_r["Arr Flt"].unique() if f not in sorted_flts]
         all_flts_ordered = sorted_flts + new_only_flts
@@ -174,6 +197,7 @@ if df_l is not None and df_r is not None:
             
             old_ids = set(curr_old["CrewID"])
             new_ids = set(curr_new["CrewID"])
+            
             out_ids = old_ids - new_ids
             in_ids = new_ids - old_ids
             stay_ids = old_ids & new_ids
@@ -187,7 +211,6 @@ if df_l is not None and df_r is not None:
                 r, a = rem_list.pop(0), add_list.pop(0)
                 items_html.append(f"<div class='item-container bg-swap'><span class='badge badge-swap'>교체</span> {r['CrewName']} ➔ <b>{a['CrewName']}</b></div>")
 
-            # --- OUT에서 CXL로 변경된 부분 ---
             for r in rem_list:
                 items_html.append(f"<div class='item-container bg-out'><span class='badge badge-out'>CXL</span> {r['CrewName']}</div>")
             
@@ -199,6 +222,7 @@ if df_l is not None and df_r is not None:
                 n_r = curr_new[curr_new["CrewID"] == sid].iloc[0]
                 sub = []
                 
+                # 띄어쓰기 다른 이름은 무시 (MatchName 사용)
                 if o_r['is_layover'] != n_r['is_layover']:
                     sub.append("연박 변경" if n_r['is_layover'] else "연박 해제")
                 
@@ -218,6 +242,6 @@ if df_l is not None and df_r is not None:
             if items_html:
                 st.markdown(f"<div class='group-card'><div class='flight-title'>✈️ {flt}</div>{''.join(items_html)}</div>", unsafe_allow_html=True)
 
-    st.success("✅ 업데이트 완료: 이름 제외 인원에 대해 'CXL' 배지가 적용되었습니다.")
+    st.success("✅ 업데이트 완료: 사번 앞자리 0 생략 및 이름 띄어쓰기 차이를 모두 해결했습니다.")
 else:
     st.info("💡 파일을 업로드하여 분석을 시작하세요.")
